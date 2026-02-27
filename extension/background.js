@@ -1,70 +1,37 @@
-// ────────────────────────────────────────────────────────────
-//  Helpers: URL Filtering
-// ────────────────────────────────────────────────────────────
+// Whitelist internal chrome pages so they don't get blocked
 const isInternalPage = (url) => {
-  return (
-    url.startsWith('chrome://') ||
-    url.startsWith('chrome-extension://') ||
-    url.startsWith('about:') ||
-    url.startsWith('edge://') ||
-    !url || url === 'about:blank'
-  );
+  return url.startsWith('chrome://') || url.startsWith('about:') || url === "";
 };
 
-const isNewTabPage = (url) => {
-  return (
-    url.startsWith('https://www.google.com/_/chrome/newtab') ||
-    url.includes('chrome://newtab')
-  );
-};
+// 1. Force Dashboard on Startup
+chrome.runtime.onStartup.addListener(() => {
+  chrome.tabs.create({ url: 'popup.html' });
+});
 
-const extractContext = (url) => {
-  try {
-    const u = new URL(url);
-    const hostname = u.hostname.replace('www.', '');
+// 2. Handle Timer Expiration
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "focusTimer") {
+    chrome.storage.local.set({ active: false });
+    
+    chrome.notifications.create({
+      type: 'basic',
+      iconUrl: 'icon.png',
+      title: 'Time is Up!',
+      message: 'Your focus session has ended. Ready for another?',
+      priority: 2
+    });
 
-    if (hostname.includes('youtube.com')) {
-      if (u.pathname === '/' || u.pathname === '/feed/trending' || u.pathname.startsWith('/shorts')) {
-        return { type: 'youtube_distraction', label: 'YouTube Distraction' };
-      }
-      const yq = u.searchParams.get('search_query') || u.searchParams.get('q');
-      if (yq) return { type: 'youtube_search', label: `Youtube: ${yq}` };
-      
-      const videoId = u.searchParams.get('v');
-      if (videoId) return { type: 'youtube_video', label: `YouTube Video` };
-    }
-
-    const gq = u.searchParams.get('q');
-    if (gq) return { type: 'search', label: `Search: ${gq}` };
-
-    return { type: 'page', label: hostname };
-  } catch (_) {
-    return { type: 'page', label: url };
+    // Re-open dashboard for next task
+    chrome.tabs.create({ url: 'popup.html' });
   }
-};
+});
 
-// ────────────────────────────────────────────────────────────
-//  Core logic
-// ────────────────────────────────────────────────────────────
-
-const checkTab = async (tabId, url) => {
-  if (isInternalPage(url) || isNewTabPage(url)) return;
+// 3. The Interceptor Logic
+const checkTab = async (tabId, url, title) => {
+  if (isInternalPage(url)) return;
 
   const data = await chrome.storage.local.get(["goal", "active"]);
-  if (!data.active || !data.goal) return;
-
-  // Wait 1 second for the page title to update (Crucial for YouTube/Google)
-  await new Promise(r => setTimeout(r, 1000));
-  
-  const tab = await chrome.tabs.get(tabId);
-  const title = tab.title || "Unknown Page";
-  const ctx = extractContext(url);
-
-  // Hard-block YouTube Home or Shorts immediately
-  if (ctx.type === 'youtube_distraction') {
-    closeTab(tabId, data.goal);
-    return;
-  }
+  if (!data.active) return;
 
   try {
     const response = await fetch("http://127.0.0.1:8000/verify", {
@@ -72,43 +39,32 @@ const checkTab = async (tabId, url) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         goal: data.goal,
-        site_title: title,
-        url: url,
-        context_label: ctx.label
+        site_title: title || "New Tab",
+        url: url
       })
     });
 
     const result = await response.json();
     if (result.decision === "BLOCKED") {
-      closeTab(tabId, data.goal);
+      chrome.tabs.remove(tabId);
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icon.png',
+        title: 'SentriFocus Blocked This',
+        message: `Stay focused on: ${data.goal}`
+      });
     }
-  } catch (error) {
-    console.error("Backend error:", error);
-  }
+  } catch (e) { console.error("Backend offline", e); }
 };
-
-const closeTab = (tabId, goal) => {
-  chrome.tabs.remove(tabId);
-  chrome.notifications.create({
-    type: 'basic',
-    iconUrl: 'icon.png',
-    title: 'Focus Alert!',
-    message: `Redirected from distraction. Goal: ${goal}`
-  });
-};
-
-// ────────────────────────────────────────────────────────────
-//  Listeners
-// ────────────────────────────────────────────────────────────
 
 chrome.webNavigation.onCommitted.addListener((details) => {
   if (details.frameId === 0) {
-    checkTab(details.tabId, details.url);
+    chrome.tabs.get(details.tabId, (tab) => { if(tab) checkTab(tab.id, tab.url, tab.title); });
   }
 });
 
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
   if (details.frameId === 0) {
-    checkTab(details.tabId, details.url);
+    chrome.tabs.get(details.tabId, (tab) => { if(tab) checkTab(tab.id, tab.url, tab.title); });
   }
 });

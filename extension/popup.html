@@ -2,19 +2,22 @@
 <html>
 <head>
   <style>
-    body { width: 250px; font-family: sans-serif; padding: 15px; }
-    input { width: 100%; margin-bottom: 10px; padding: 5px; box-sizing: border-box; }
-    button { width: 100%; padding: 8px; cursor: pointer; border: none; border-radius: 4px; }
+    body { width: 250px; font-family: sans-serif; padding: 15px; background: #f9f9f9; }
+    h3 { margin-top: 0; color: #2c3e50; }
+    input { width: 100%; margin-bottom: 10px; padding: 8px; box-sizing: border-box; border: 1px solid #ddd; border-radius: 4px; }
+    button { width: 100%; padding: 10px; cursor: pointer; border: none; border-radius: 4px; font-weight: bold; }
     #start { background: #2ecc71; color: white; margin-bottom: 5px; }
     #stop { background: #e74c3c; color: white; }
+    #status { font-size: 13px; color: #2980b9; margin-top: 10px; text-align: center; }
   </style>
 </head>
 <body>
   <h3>SentriFocus AI</h3>
-  <input type="text" id="goal" placeholder="Enter your task goal...">
+  <input type="text" id="goal" placeholder="What is your goal?">
+  <input type="number" id="minutes" placeholder="Minutes (e.g., 25)" min="1">
   <button id="start">Activate Focus</button>
-  <button id="stop">Deactivate</button>
-  <p id="status" style="font-size: 12px; color: #666;"></p>
+  <button id="stop">End Session</button>
+  <p id="status">Ready to focus?</p>
   <script src="popup.js"></script>
 </body>
 </html>
