@@ -1,6 +1,7 @@
 'use strict';
 
 const { EventEmitter } = require('events');
+const { exec } = require('child_process');
 const screenshot = require('./screenshot');
 const inputMonitor = require('./inputMonitor');
 const ocr = require('./ocr');
@@ -11,6 +12,7 @@ const db = require('../db/database');
 const notifier = require('node-notifier');
 const { ProcessScanner } = require('./processScanner');
 const { WindowWatcher } = require('./windowWatcher');
+const rulesets = require('./rulesets');
 
 class SessionManager extends EventEmitter {
     constructor() {
@@ -89,55 +91,64 @@ class SessionManager extends EventEmitter {
      * @private
      */
     _startDetectors() {
+        console.log('[session] _startDetectors() — wiring Layer 1 & 2 event listeners...');
+
         // --- Layer 1: Process Scanner ---
         this._processScanner.on('instant:distraction', (data) => {
-            console.log(`[session] L1 instant distraction: ${data.displayName}`);
+            console.log(`[session] L1 EVENT received: instant:distraction — ${data.displayName} (score: ${data.score})`);
             this._handleInstantDetection(data.score, data.category, data.displayName, 100);
         });
 
         this._processScanner.on('instant:focus', (data) => {
-            console.log(`[session] L1 instant focus: ${data.displayName}`);
+            console.log(`[session] L1 EVENT received: instant:focus — ${data.displayName} (score: ${data.score})`);
             this._handleInstantDetection(data.score, 'FOCUS', data.displayName, 95);
         });
 
         this._processScanner.on('soft:flag', (data) => {
+            console.log(`[session] L1 EVENT received: soft:flag — ${data.displayName} (score: ${data.score})`);
             // Store for fusion — the main loop will pick this up
             this._lastLayerScore = data.score;
             this._lastLayerCategory = data.category;
             this._lastLayerApp = data.displayName;
         });
 
+        console.log('[session] ✓ L1 listeners attached, calling processScanner.start()');
         this._processScanner.start(this.taskText);
 
         // --- Layer 2: Window Watcher ---
-        this._windowWatcher.on('window:changed', () => {
+        this._windowWatcher.on('window:changed', (data) => {
+            console.log(`[session] L2 EVENT received: window:changed — to: "${data.to.title.substring(0, 60)}" (${data.to.application})`);
             // Any window switch → trigger immediate screenshot in the main loop
             this._immediateCaptureRequested = true;
         });
 
         this._windowWatcher.on('window:distraction:instant', (data) => {
-            console.log(`[session] L2 instant distraction: ${data.label}`);
+            console.log(`[session] L2 EVENT received: window:distraction:instant — ${data.label} (score: ${data.score})`);
             this._handleInstantDetection(data.score, data.category, data.label, 95);
         });
 
         this._windowWatcher.on('window:distraction:soft', (data) => {
+            console.log(`[session] L2 EVENT received: window:distraction:soft — ${data.label} (score: ${data.score})`);
             this._lastLayerScore = data.score;
             this._lastLayerCategory = data.category;
             this._lastLayerApp = data.label;
         });
 
         this._windowWatcher.on('window:focus', (data) => {
-            console.log(`[session] L2 focus detected: ${data.label}`);
+            console.log(`[session] L2 EVENT received: window:focus — ${data.label} (score: ${data.score})`);
             this._handleInstantDetection(data.score, 'FOCUS', data.label, 90);
         });
 
-        this._windowWatcher.on('window:ambiguous', () => {
+        this._windowWatcher.on('window:ambiguous', (data) => {
+            console.log(`[session] L2 EVENT received: window:ambiguous — ${data.label} (score: ${data.score})`);
             // Ambiguous content (YouTube etc.) → force immediate screenshot for Gemini
             this._lastLayerScore = null; // clear — let Gemini decide
             this._immediateCaptureRequested = true;
         });
 
+        console.log('[session] ✓ L2 listeners attached, calling windowWatcher.start()');
         this._windowWatcher.start(this.taskText);
+        console.log('[session] ✓ Both detectors started');
     }
 
     /**
@@ -475,5 +486,99 @@ class SessionManager extends EventEmitter {
         return new Promise((resolve) => setTimeout(resolve, ms));
     }
 }
+
+// ─── STEP 5: Test Detection Diagnostics ─────────────────────────────────────
+// Runs once 3 seconds after module loads (i.e. after app ready).
+// Prints what the scanner and watcher actually see.
+
+function testDetection() {
+    console.log('\n══════════════════════════════════════════════════════');
+    console.log('[testDetection] Running Layer 1 & 2 detection diagnostics...');
+    console.log('══════════════════════════════════════════════════════');
+
+    // --- Part A: Tasklist (first 20 processes) ---
+    const isWindows = process.platform === 'win32';
+    if (isWindows) {
+        exec('tasklist /FO CSV /NH', { timeout: 5000, maxBuffer: 1024 * 512 }, (err, stdout) => {
+            if (err) {
+                console.error('[testDetection] tasklist error:', err.message);
+            } else {
+                const lines = stdout.split('\n').slice(0, 20);
+                const names = lines.map(l => {
+                    const m = l.trim().match(/^"([^"]+)"/);
+                    return m ? m[1].toLowerCase() : null;
+                }).filter(Boolean);
+                console.log('[testDetection] tasklist first 20:', names.join(', '));
+
+                // Check which ones match rules
+                const matches = names.filter(n => rulesets.matchProcess(n));
+                console.log('[testDetection] tasklist rule matches:', matches.length > 0 ? matches.join(', ') : '(none)');
+            }
+        });
+
+        // --- Part B: Get-Process (catches Store apps) ---
+        exec('powershell -NoProfile -Command "Get-Process | Select-Object -ExpandProperty Name -Unique | Sort-Object"',
+            { timeout: 5000, maxBuffer: 1024 * 512 }, (err, stdout) => {
+                if (err) {
+                    console.error('[testDetection] Get-Process error:', err.message);
+                } else {
+                    const names = stdout.split('\n').map(l => l.trim().toLowerCase()).filter(Boolean);
+                    console.log(`[testDetection] Get-Process unique processes: ${names.length}`);
+                    // Check for known distractions/focus
+                    const matchedPs = names.filter(n =>
+                        rulesets.matchProcess(n) || rulesets.matchProcess(n + '.exe')
+                    );
+                    console.log('[testDetection] Get-Process rule matches:', matchedPs.length > 0 ? matchedPs.join(', ') : '(none)');
+
+                    // Specifically look for Store app names
+                    const storeApps = names.filter(n =>
+                        n.includes('whatsapp') || n.includes('discord') || n.includes('telegram') ||
+                        n.includes('spotify') || n.includes('xbox') || n.includes('minecraft') ||
+                        n.includes('applicationframehost')
+                    );
+                    if (storeApps.length > 0) {
+                        console.log('[testDetection] Store/UWP apps detected via Get-Process:', storeApps.join(', '));
+                    } else {
+                        console.log('[testDetection] No known Store/UWP apps found via Get-Process');
+                    }
+                }
+            });
+    }
+
+    // --- Part C: Active Window raw output ---
+    try {
+        const { ActiveWindow } = require('@paymoapp/active-window');
+        const win = ActiveWindow.getActiveWindow();
+        if (win) {
+            console.log('[testDetection] ActiveWindow raw:', JSON.stringify({
+                title: (win.title || '').substring(0, 100),
+                application: win.application || '',
+                name: win.name || '',
+                path: (win.path || '').substring(0, 120),
+                pid: win.pid || 0,
+                isUWPApp: win.isUWPApp,
+                uwpPackage: win.uwpPackage || '',
+            }));
+
+            // Test evaluation
+            const title = (win.title || '').toLowerCase();
+            const app = (win.application || win.name || '').toLowerCase();
+            console.log(`[testDetection] isBrowser("${app}"): ${rulesets.isBrowser(app)}`);
+            console.log(`[testDetection] matchProcess("${app}"): ${JSON.stringify(rulesets.matchProcess(app))}`);
+            console.log(`[testDetection] matchProcess("${app}.exe"): ${JSON.stringify(rulesets.matchProcess(app + '.exe'))}`);
+            console.log(`[testDetection] matchTitleFallback("${title.substring(0, 60)}"): ${JSON.stringify(rulesets.matchTitleFallback(title))}`);
+            console.log(`[testDetection] matchBrowserTitle("${title.substring(0, 60)}"): ${JSON.stringify(rulesets.matchBrowserTitle(title))}`);
+        } else {
+            console.warn('[testDetection] ActiveWindow.getActiveWindow() returned null');
+        }
+    } catch (err) {
+        console.error('[testDetection] ActiveWindow error:', err.message);
+    }
+
+    console.log('══════════════════════════════════════════════════════\n');
+}
+
+// Schedule test 3 seconds after module load
+setTimeout(testDetection, 3000);
 
 module.exports = new SessionManager();
