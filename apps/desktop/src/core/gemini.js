@@ -8,7 +8,7 @@
  */
 
 const API_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const MODEL = 'openai/gpt-4o';
+const MODEL = 'google/gemini-2.0-flash-001';
 const TIMEOUT_MS = 10000;
 
 /**
