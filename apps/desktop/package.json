@@ -1,9 +1,16 @@
 {
-  "name": "desktop",
+  "name": "cognitionx-desktop",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "CognitionX — AI-powered focus enforcement for students",
+  "main": "electron/main.js",
   "scripts": {
+    "dev:vite": "npx vite",
+    "dev:electron": "node scripts/launch-electron.js",
+    "dev": "concurrently -k \"npm run dev:vite\" \"npx wait-on http://localhost:5173 && npm run dev:electron\"",
+    "build": "npx vite build",
+    "start": "node scripts/launch-electron.js",
+    "rebuild": "npx electron-rebuild -f -w better-sqlite3",
+    "postinstall": "npx electron-rebuild -f -w better-sqlite3",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -14,7 +21,7 @@
     "@google/generative-ai": "^0.24.1",
     "@vitejs/plugin-react": "^5.1.4",
     "better-sqlite3": "^12.6.2",
-    "electron": "^40.6.1",
+    "dotenv": "^16.6.1",
     "node-notifier": "^10.0.1",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -26,7 +33,10 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.3",
     "concurrently": "^9.2.1",
-    "electron-builder": "^26.8.1"
+    "electron": "^33.4.11",
+    "electron-builder": "^26.8.1",
+    "wait-on": "^8.0.5"
   }
 }
