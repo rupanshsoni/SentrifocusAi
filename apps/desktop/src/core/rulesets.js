@@ -45,8 +45,15 @@ const PROCESS_RULES = {
 
     // === Social (score 15 — soft distraction, study contexts exist) ===
     'discord.exe':                      { displayName: 'Discord',         score: 15, category: 'SOCIAL' },
+    'discord':                          { displayName: 'Discord',         score: 15, category: 'SOCIAL' },
     'telegram.exe':                     { displayName: 'Telegram',        score: 15, category: 'SOCIAL' },
+    'telegram':                         { displayName: 'Telegram',        score: 15, category: 'SOCIAL' },
     'whatsapp.exe':                     { displayName: 'WhatsApp',        score: 15, category: 'SOCIAL' },
+    'whatsapp':                         { displayName: 'WhatsApp',        score: 15, category: 'SOCIAL' },
+
+    // === Microsoft Store / UWP variants (caught by Get-Process) ===
+    'applicationframehost.exe':         { displayName: 'Store App (UWP)', score: -1, category: 'UWP_UNKNOWN' },
+    'applicationframehost':             { displayName: 'Store App (UWP)', score: -1, category: 'UWP_UNKNOWN' },
 
     // === Communication / Work-ambiguous (score 40) ===
     'slack.exe':                        { displayName: 'Slack',           score: 40, category: 'COMMUNICATION' },
@@ -55,6 +62,7 @@ const PROCESS_RULES = {
 
     // === Entertainment (score 20 — lo-fi / background music is OK-ish) ===
     'spotify.exe':                      { displayName: 'Spotify',         score: 20, category: 'ENTERTAINMENT' },
+    'spotify':                          { displayName: 'Spotify',         score: 20, category: 'ENTERTAINMENT' },
 
     // === Focus / Productivity Apps (score 80-90) ===
     'code.exe':                         { displayName: 'VS Code',         score: 90, category: 'FOCUS' },
@@ -199,11 +207,44 @@ function matchProcess(processName) {
     return PROCESS_RULES[processName.toLowerCase()] || null;
 }
 
+// ─── Title Fallback Rules for UWP / Store Apps ─────────────────────────────
+// When application name is empty or 'applicationframehost', match title instead.
+const TITLE_FALLBACK_RULES = {
+    'whatsapp':        { displayName: 'WhatsApp',        score: 15, category: 'SOCIAL' },
+    'discord':         { displayName: 'Discord',         score: 15, category: 'SOCIAL' },
+    'telegram':        { displayName: 'Telegram',        score: 15, category: 'SOCIAL' },
+    'microsoft store': { displayName: 'Microsoft Store', score: 10, category: 'ENTERTAINMENT' },
+    'store':           { displayName: 'Microsoft Store', score: 10, category: 'ENTERTAINMENT' },
+    'spotify':         { displayName: 'Spotify',         score: 20, category: 'ENTERTAINMENT' },
+    'netflix':         { displayName: 'Netflix',         score: 0,  category: 'VIDEO_DISTRACTION' },
+    'xbox':            { displayName: 'Xbox',            score: 0,  category: 'GAMING' },
+    'minecraft':       { displayName: 'Minecraft',       score: 0,  category: 'GAMING' },
+};
+
+/**
+ * Match a window title against TITLE_FALLBACK_RULES.
+ * Used when the application name is missing or generic (UWP/Store apps).
+ * @param {string} title - Lowercase window title
+ * @returns {{ displayName: string, score: number, category: string } | null}
+ */
+function matchTitleFallback(title) {
+    if (!title) return null;
+    const lower = title.toLowerCase();
+    for (const [keyword, rule] of Object.entries(TITLE_FALLBACK_RULES)) {
+        if (lower.includes(keyword)) {
+            return rule;
+        }
+    }
+    return null;
+}
+
 module.exports = {
     PROCESS_RULES,
     BROWSER_TITLE_RULES,
     BROWSER_PROCESSES,
+    TITLE_FALLBACK_RULES,
     isBrowser,
     matchBrowserTitle,
     matchProcess,
+    matchTitleFallback,
 };
