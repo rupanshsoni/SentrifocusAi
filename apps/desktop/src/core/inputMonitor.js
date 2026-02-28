@@ -12,17 +12,17 @@ let lastEventTime = 0;
 
 // --- Activity Level Thresholds ---
 const THRESHOLDS = {
-    HIGH: 20,   // > 20 events in 10s
-    MEDIUM: 5,  // 5–20 events in 10s
-    LOW: 1,     // 1–5 events in 10s
+    HIGH: 10,   // > 10 events in 10s
+    MEDIUM: 3,  // 3–10 events in 10s
+    LOW: 1,     // 1–3 events in 10s
 };
 
 // --- Screenshot Interval Mapping ---
 const INTERVALS = {
-    HIGH: 7500,    // 7.5 seconds
-    MEDIUM: 30000, // 30 seconds
-    LOW: 90000,    // 90 seconds
-    IDLE: null,    // paused — no screenshots
+    HIGH: 5000,    // 5 seconds — active typing/clicking
+    MEDIUM: 10000, // 10 seconds — moderate activity
+    LOW: 15000,    // 15 seconds — minimal activity (e.g. watching/reading)
+    IDLE: 20000,   // 20 seconds — no input but session is active (e.g. video)
 };
 
 /**
