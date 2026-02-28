@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import useSessionStore from './store/sessionStore';
 
 /**
  * Active Session view — live focus monitoring display.
@@ -15,8 +16,12 @@ export default function ActiveSession({ task, onStop }) {
     const [showOverlay, setShowOverlay] = useState(false);
     const [overlayMessage, setOverlayMessage] = useState('');
     const [confirmStop, setConfirmStop] = useState(false);
+    const [streakSecs, setStreakSecs] = useState(0);
+    const [distractionCount, setDistractionCount] = useState(0);
     const startTime = useRef(Date.now());
     const timerRef = useRef(null);
+
+    const { showIntervention } = useSessionStore();
 
     // Timer
     useEffect(() => {
@@ -31,38 +36,46 @@ export default function ActiveSession({ task, onStop }) {
 
     // Listen for session updates
     useEffect(() => {
-        const cleanupUpdate = window.electron.on('sessionUpdate', (data) => {
+        const cleanupUpdate = window.electron?.on('sessionUpdate', (data) => {
             if (data.score != null) setScore(data.score);
             if (data.activityType) setActivityType(data.activityType);
             if (data.appName) setAppName(data.appName);
             if (data.credits != null) setCredits(data.credits);
             if (data.interventionLevel != null) setInterventionLevel(data.interventionLevel);
             if (data.state) setState(data.state);
+            if (data.streakSecs != null) setStreakSecs(data.streakSecs);
+            if (data.distractionCount != null) setDistractionCount(data.distractionCount);
         });
 
-        const cleanupOverlay = window.electron.on('showOverlay', (data) => {
+        const cleanupOverlay = window.electron?.on('showOverlay', (data) => {
             setOverlayMessage(data.message || 'Time to refocus!');
             setShowOverlay(true);
         });
 
-        const cleanupCredit = window.electron.on('creditUpdate', (data) => {
+        const cleanupCredit = window.electron?.on('creditUpdate', (data) => {
             setCredits(data.balance);
         });
 
+        // Listen for the new mode-aware intervention events
+        const cleanupIntervention = window.electron?.on('intervention:show', (data) => {
+            showIntervention(data);
+        });
+
         // Get initial credits
-        window.electron.ipc.getCredits().then(setCredits);
+        window.electron?.ipc?.getCredits().then(setCredits);
 
         return () => {
             if (cleanupUpdate) cleanupUpdate();
             if (cleanupOverlay) cleanupOverlay();
             if (cleanupCredit) cleanupCredit();
+            if (cleanupIntervention) cleanupIntervention();
         };
     }, []);
 
     const handleDismissOverlay = async () => {
         setShowOverlay(false);
         setInterventionLevel(0);
-        const result = await window.electron.ipc.acknowledgeIntervention();
+        const result = await window.electron?.ipc?.acknowledgeIntervention();
         if (result?.credits != null) setCredits(result.credits);
     };
 
@@ -200,6 +213,34 @@ export default function ActiveSession({ task, onStop }) {
                     </span>
                 </div>
             )}
+
+            {/* Streak & Distraction Row */}
+            <div className="flex items-center gap-3 px-1">
+                {Math.floor(streakSecs / 60) >= 1 && (
+                    <span
+                        className="text-xs font-semibold px-2.5 py-1 rounded-full"
+                        style={{
+                            background: Math.floor(streakSecs / 60) >= 30
+                                ? 'rgba(239, 68, 68, 0.15)'
+                                : Math.floor(streakSecs / 60) >= 15
+                                    ? 'rgba(249, 115, 22, 0.15)'
+                                    : 'rgba(245, 158, 11, 0.15)',
+                            color: Math.floor(streakSecs / 60) >= 30
+                                ? '#EF4444'
+                                : Math.floor(streakSecs / 60) >= 15
+                                    ? '#F97316'
+                                    : '#F59E0B',
+                        }}
+                    >
+                        🔥 {Math.floor(streakSecs / 60)}m streak
+                    </span>
+                )}
+                {distractionCount > 0 && (
+                    <span className="text-[10px]" style={{ color: distractionCount > 3 ? '#EF4444' : 'rgba(255,255,255,0.4)' }}>
+                        {distractionCount} distraction{distractionCount !== 1 ? 's' : ''}
+                    </span>
+                )}
+            </div>
 
             {/* Stop Button */}
             <div className="mt-auto pb-2">
