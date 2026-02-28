@@ -1,32 +1,25 @@
-// Whitelist internal chrome pages so they don't get blocked
 const isInternalPage = (url) => {
   return url.startsWith('chrome://') || url.startsWith('about:') || url === "";
 };
 
-// 1. Force Dashboard on Startup
 chrome.runtime.onStartup.addListener(() => {
   chrome.tabs.create({ url: 'popup.html' });
 });
 
-// 2. Handle Timer Expiration
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "focusTimer") {
     chrome.storage.local.set({ active: false });
-    
     chrome.notifications.create({
       type: 'basic',
       iconUrl: 'icon.png',
       title: 'Time is Up!',
-      message: 'Your focus session has ended. Ready for another?',
+      message: 'Your focus session has ended.',
       priority: 2
     });
-
-    // Re-open dashboard for next task
     chrome.tabs.create({ url: 'popup.html' });
   }
 });
 
-// 3. The Interceptor Logic
 const checkTab = async (tabId, url, title) => {
   if (isInternalPage(url)) return;
 
@@ -46,24 +39,20 @@ const checkTab = async (tabId, url, title) => {
 
     const result = await response.json();
     if (result.decision === "BLOCKED") {
-      chrome.tabs.remove(tabId);
-      chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icon.png',
-        title: 'SentriFocus Blocked This',
-        message: `Stay focused on: ${data.goal}`
-      });
+      // INSTEAD OF REMOVING: Send message to content script to start countdown
+      chrome.tabs.sendMessage(tabId, { action: "BLOCK_TAB", goal: data.goal });
     }
   } catch (e) { console.error("Backend offline", e); }
 };
 
-chrome.webNavigation.onCommitted.addListener((details) => {
-  if (details.frameId === 0) {
-    chrome.tabs.get(details.tabId, (tab) => { if(tab) checkTab(tab.id, tab.url, tab.title); });
+// Listen for the signal from content script to actually close the tab after 5s
+chrome.runtime.onMessage.addListener((request, sender) => {
+  if (request.action === "CLOSE_MY_TAB" && sender.tab) {
+    chrome.tabs.remove(sender.tab.id);
   }
 });
 
-chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+chrome.webNavigation.onCommitted.addListener((details) => {
   if (details.frameId === 0) {
     chrome.tabs.get(details.tabId, (tab) => { if(tab) checkTab(tab.id, tab.url, tab.title); });
   }
