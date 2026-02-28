@@ -1,13 +1,22 @@
+import os
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
 from groq import Groq
+from dotenv import load_dotenv
+
+# Load variables from .env file
+load_dotenv()
 
 app = FastAPI(title="SentriFocus AI - Backend")
 
-# Keep your API key as is
-GROQ_API_KEY = "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"
+# Get the API key from environment variables
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY not found in .env file")
+
 client = Groq(api_key=GROQ_API_KEY)
 
 class IntentCheck(BaseModel):
@@ -22,7 +31,6 @@ def home():
 
 @app.post("/verify")
 async def verify_intent(data: IntentCheck):
-    # Use the site title or context label to give the AI the best chance to understand
     context_hint = data.site_title or data.context_label or data.url
 
     prompt = f"""You are a helpful academic supervisor. A student is trying to: "{data.goal}"
@@ -48,7 +56,6 @@ Response: ONLY "ALLOWED" or "BLOCKED"."""
             max_tokens=5
         )
         decision = completion.choices[0].message.content.strip().upper()
-        # Ensure we only return one of the two keywords
         final_decision = "ALLOWED" if "ALLOWED" in decision else "BLOCKED"
         return {"decision": final_decision, "raw": decision}
     except Exception as e:
