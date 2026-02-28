@@ -19,6 +19,7 @@
   "type": "commonjs",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@paymoapp/active-window": "^2.1.2",
     "@vitejs/plugin-react": "^5.1.4",
     "better-sqlite3": "^12.6.2",
     "dotenv": "^16.6.1",

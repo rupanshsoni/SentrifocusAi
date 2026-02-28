@@ -186,8 +186,83 @@ function getDriftCounter() {
     return driftCounter;
 }
 
+/**
+ * Process an instant detection from Layer 1/2 (process scanner or window watcher).
+ * These detections have high confidence and skip the Gemini pipeline.
+ * Score 0 → immediate Level 2+ intervention (overlay, not just toast).
+ * Score 80+ → instant focus, clear any drift state.
+ *
+ * @param {number} score - Relevance score from rulesets (0 or 80+)
+ * @param {string} category - Activity category (GAMING, SOCIAL_MEDIA, etc.)
+ * @returns {{level: number, type: string, message: string}|null}
+ */
+function processInstant(score, category) {
+    try {
+        if (state === STATES.IDLE) {
+            state = STATES.MONITORING;
+        }
+
+        // High-confidence focus detection
+        if (score >= 70) {
+            driftCounter = 0;
+            focusCounter += 2; // accelerate focus streak
+            state = STATES.MONITORING;
+            return null;
+        }
+
+        // High-confidence distraction detection — escalate faster
+        focusCounter = 0;
+        driftCounter += 2; // count as 2 drifts (high confidence = skip gentle nudge)
+        state = STATES.INTERVENING;
+
+        const isGaming = category === 'GAMING';
+        const isSocialMedia = category === 'SOCIAL_MEDIA' || category === 'SOCIAL';
+        const isVideo = category === 'VIDEO_DISTRACTION';
+
+        // Gaming → immediate overlay (Level 2) or higher
+        if (isGaming) {
+            if (driftCounter >= 4) {
+                return {
+                    ...LEVELS.MEDIA_PAUSE,
+                    message: `Gaming detected! You should be working on your task.`,
+                };
+            }
+            return {
+                ...LEVELS.OVERLAY,
+                message: `Gaming detected! Your task is waiting — close the game and refocus.`,
+            };
+        }
+
+        // Social media → overlay + extension blur
+        if (isSocialMedia) {
+            return {
+                ...LEVELS.EXTENSION_COMMAND,
+                message: `Social media detected. Let's get back on track!`,
+            };
+        }
+
+        // Video distraction → media pause
+        if (isVideo) {
+            return {
+                ...LEVELS.MEDIA_PAUSE,
+                message: `Distracting video detected. Pausing so you can refocus.`,
+            };
+        }
+
+        // Default: overlay
+        return {
+            ...LEVELS.OVERLAY,
+            message: `Distraction detected! Your task is waiting — you've got this!`,
+        };
+    } catch (err) {
+        console.error('[intervention] processInstant failed:', err.message);
+        return null;
+    }
+}
+
 module.exports = {
     processScore,
+    processInstant,
     getState,
     acknowledge,
     reset,
