@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const dotenv = require('dotenv');
+const overlayManager = require('./overlays/overlayManager');
 
 // Load .env from the desktop app directory
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -23,10 +24,10 @@ function createWindow() {
     const isDev = !app.isPackaged;
 
     mainWindow = new BrowserWindow({
-        width: 420,
-        height: 640,
-        minWidth: 380,
-        minHeight: 500,
+        width: 1280,
+        height: 800,
+        minWidth: 900,
+        minHeight: 600,
         frame: false,
         transparent: false,
         backgroundColor: '#0f0f23',
@@ -217,6 +218,67 @@ function registerIpcHandlers() {
     ipcMain.handle('isExtensionConnected', () => {
         return wsServer.isExtensionConnected();
     });
+
+    // --- Overlay IPC Handlers ---
+    ipcMain.on('overlay:dismissed', (event, { level, action }) => {
+        try {
+            overlayManager.hideIntervention();
+            intervention.acknowledge();
+        } catch (err) {
+            console.error('[ipc] overlay:dismissed failed:', err.message);
+        }
+    });
+
+    ipcMain.on('overlay:selfCorrected', () => {
+        try {
+            overlayManager.hideIntervention();
+            const result = session.handleSelfCorrection();
+            if (result && result.bonus > 0) {
+                overlayManager.showCreditEarned({ amount: result.bonus, reason: 'self_correction' });
+            }
+        } catch (err) {
+            console.error('[ipc] overlay:selfCorrected failed:', err.message);
+        }
+    });
+
+    ipcMain.on('overlay:spendCredits', (event, { amount }) => {
+        try {
+            const balance = db.getCreditsBalance();
+            if (balance >= amount) {
+                db.mutateCredits(-amount, 'delay_intervention');
+            }
+            overlayManager.hideIntervention();
+        } catch (err) {
+            console.error('[ipc] overlay:spendCredits failed:', err.message);
+        }
+    });
+
+    ipcMain.on('overlay:captureMouseEvents', () => {
+        overlayManager.captureInterventionMouse();
+    });
+
+    ipcMain.on('overlay:releaseMouseEvents', () => {
+        overlayManager.releaseInterventionMouse();
+    });
+
+    ipcMain.on('sessionlock:captureMouseEvents', () => {
+        overlayManager.captureSessionLockMouse();
+    });
+
+    ipcMain.on('sessionlock:releaseMouseEvents', () => {
+        overlayManager.releaseSessionLockMouse();
+    });
+
+    ipcMain.on('sessionlock:stayFocused', () => {
+        overlayManager.hideSessionLock();
+    });
+
+    ipcMain.on('sessionlock:override', () => {
+        overlayManager.hideSessionLock();
+        session.stopSession().catch((err) => {
+            console.error('[ipc] sessionlock:override failed:', err.message);
+        });
+    });
 }
 
 /**
@@ -227,58 +289,73 @@ function registerSessionEvents() {
         if (mainWindow && mainWindow.webContents) {
             mainWindow.webContents.send('sessionUpdate', data);
         }
+        // Update the focus bar overlay with latest data
+        overlayManager.updateFocusBar({
+            score: data.score || 0,
+            streak: data.streakSecs || 0,
+            task: data.appName || '',
+            credits: data.credits || 0,
+        });
     });
 
     session.on('sessionStarted', (data) => {
         if (mainWindow && mainWindow.webContents) {
             mainWindow.webContents.send('sessionStarted', data);
         }
+        // Show the focus bar when a session starts
+        overlayManager.showFocusBar();
+        overlayManager.updateFocusBar({
+            score: 100, streak: 0, task: data.task || '', credits: 0,
+        });
     });
 
     session.on('sessionEnded', (data) => {
         if (mainWindow && mainWindow.webContents) {
             mainWindow.webContents.send('sessionEnded', data);
         }
+        // Hide the focus bar when session ends
+        overlayManager.hideFocusBar();
     });
 
     session.on('showOverlay', (data) => {
-        if (mainWindow && mainWindow.webContents) {
-            mainWindow.webContents.send('showOverlay', data);
-        }
+        // Redirected to overlay windows
+        overlayManager.showIntervention(data);
     });
 
     session.on('creditUpdate', (data) => {
+        // Show credit notification on overlay + forward to main renderer
+        if (data.earned && data.earned > 0) {
+            overlayManager.showCreditEarned({ amount: data.earned, reason: data.reason || 'focus_block' });
+        }
         if (mainWindow && mainWindow.webContents) {
             mainWindow.webContents.send('creditUpdate', data);
         }
     });
 
     session.on('intervention', (data) => {
+        // Informational — still goes to main renderer for ActiveSession display
         if (mainWindow && mainWindow.webContents) {
             mainWindow.webContents.send('intervention', data);
         }
     });
 
     // --- New intervention events ---
+    // --- Intervention events now go to overlay windows ---
     session.on('intervention:show', (data) => {
-        if (mainWindow && mainWindow.webContents) {
-            mainWindow.webContents.send('intervention:show', data);
-        }
+        overlayManager.showIntervention(data);
     });
 
-    session.on('intervention:hide', (data) => {
-        if (mainWindow && mainWindow.webContents) {
-            mainWindow.webContents.send('intervention:hide', data);
-        }
+    session.on('intervention:hide', () => {
+        overlayManager.hideIntervention();
     });
 
     session.on('intervention:countdown', (data) => {
-        if (mainWindow && mainWindow.webContents) {
-            mainWindow.webContents.send('intervention:countdown', data);
-        }
+        overlayManager.tickIntervention(data.remaining);
     });
 
     session.on('intervention:forceClosed', (data) => {
+        overlayManager.hideIntervention();
+        // Still inform the main renderer for logging/display
         if (mainWindow && mainWindow.webContents) {
             mainWindow.webContents.send('intervention:forceClosed', data);
         }
@@ -291,6 +368,8 @@ function registerSessionEvents() {
 
 // --- App Lifecycle ---
 app.whenReady().then(() => {
+    const isDev = !app.isPackaged;
+
     // Load core modules AFTER app is ready (they may import Electron APIs)
     session = require('../src/core/session');
     intervention = require('../src/core/intervention');
@@ -307,11 +386,14 @@ app.whenReady().then(() => {
     createWindow();
     createTray();
 
+    // Create all overlay windows
+    overlayManager.initAll(isDev);
+
     // Wire IPC and events
     registerIpcHandlers();
     registerSessionEvents();
 
-    console.log('[main] CognitionX started');
+    console.log('[main] CognitionX started (with overlay system)');
 });
 
 app.on('window-all-closed', () => {
@@ -319,6 +401,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+    overlayManager.destroyAll();
     if (wsServer) wsServer.stopServer();
     if (db) db.closeDatabase();
 });

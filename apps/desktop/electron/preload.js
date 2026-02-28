@@ -57,13 +57,10 @@ contextBridge.exposeInMainWorld('electron', {
             'sessionUpdate',
             'sessionStarted',
             'sessionEnded',
-            'showOverlay',
             'creditUpdate',
             'intervention',
-            'intervention:show',
-            'intervention:hide',
-            'intervention:countdown',
             'intervention:forceClosed',
+            // intervention:show/hide/countdown now handled by overlay windows
         ];
         if (validChannels.includes(channel)) {
             const subscription = (event, ...args) => callback(...args);

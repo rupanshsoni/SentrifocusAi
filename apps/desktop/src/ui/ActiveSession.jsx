@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import useSessionStore from './store/sessionStore';
 
 /**
  * Active Session view — live focus monitoring display.
+ * Landscape layout: score ring + stats left, details right.
+ * Interventions are handled by overlay windows (not rendered here).
  * @param {{ task: string, onStop: () => void }} props
  */
 export default function ActiveSession({ task, onStop }) {
@@ -13,28 +14,21 @@ export default function ActiveSession({ task, onStop }) {
     const [elapsed, setElapsed] = useState(0);
     const [interventionLevel, setInterventionLevel] = useState(0);
     const [state, setState] = useState('MONITORING');
-    const [showOverlay, setShowOverlay] = useState(false);
-    const [overlayMessage, setOverlayMessage] = useState('');
     const [confirmStop, setConfirmStop] = useState(false);
     const [streakSecs, setStreakSecs] = useState(0);
     const [distractionCount, setDistractionCount] = useState(0);
     const startTime = useRef(Date.now());
     const timerRef = useRef(null);
 
-    const { showIntervention } = useSessionStore();
-
     // Timer
     useEffect(() => {
         timerRef.current = setInterval(() => {
             setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
         }, 1000);
-
-        return () => {
-            if (timerRef.current) clearInterval(timerRef.current);
-        };
+        return () => { if (timerRef.current) clearInterval(timerRef.current); };
     }, []);
 
-    // Listen for session updates
+    // Listen for session updates from main process
     useEffect(() => {
         const cleanupUpdate = window.electron?.on('sessionUpdate', (data) => {
             if (data.score != null) setScore(data.score);
@@ -47,18 +41,8 @@ export default function ActiveSession({ task, onStop }) {
             if (data.distractionCount != null) setDistractionCount(data.distractionCount);
         });
 
-        const cleanupOverlay = window.electron?.on('showOverlay', (data) => {
-            setOverlayMessage(data.message || 'Time to refocus!');
-            setShowOverlay(true);
-        });
-
         const cleanupCredit = window.electron?.on('creditUpdate', (data) => {
             setCredits(data.balance);
-        });
-
-        // Listen for the new mode-aware intervention events
-        const cleanupIntervention = window.electron?.on('intervention:show', (data) => {
-            showIntervention(data);
         });
 
         // Get initial credits
@@ -66,18 +50,9 @@ export default function ActiveSession({ task, onStop }) {
 
         return () => {
             if (cleanupUpdate) cleanupUpdate();
-            if (cleanupOverlay) cleanupOverlay();
             if (cleanupCredit) cleanupCredit();
-            if (cleanupIntervention) cleanupIntervention();
         };
     }, []);
-
-    const handleDismissOverlay = async () => {
-        setShowOverlay(false);
-        setInterventionLevel(0);
-        const result = await window.electron?.ipc?.acknowledgeIntervention();
-        if (result?.credits != null) setCredits(result.credits);
-    };
 
     const handleStop = () => {
         if (!confirmStop) {
@@ -89,15 +64,22 @@ export default function ActiveSession({ task, onStop }) {
     };
 
     const formatTime = (secs) => {
-        const m = Math.floor(secs / 60);
+        const h = Math.floor(secs / 3600);
+        const m = Math.floor((secs % 3600) / 60);
         const s = secs % 60;
+        if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
         return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
     };
 
-    const scoreColor = score === null ? 'var(--cx-text-muted)'
-        : score >= 70 ? 'var(--cx-success)'
-            : score >= 50 ? 'var(--cx-warning)'
-                : 'var(--cx-danger)';
+    const scoreColor = score === null ? 'text-gray-400'
+        : score >= 70 ? 'text-emerald-500'
+            : score >= 50 ? 'text-amber-500'
+                : 'text-red-500';
+
+    const scoreColorHex = score === null ? '#9CA3AF'
+        : score >= 70 ? '#22C55E'
+            : score >= 50 ? '#F59E0B'
+                : '#EF4444';
 
     const stateLabel = {
         IDLE: 'Initializing...',
@@ -107,154 +89,118 @@ export default function ActiveSession({ task, onStop }) {
         RETURNING: '↩️ Returning...',
     };
 
-    return (
-        <div className="p-5 flex flex-col h-full gap-4 relative">
-            {/* Intervention Overlay */}
-            {showOverlay && (
-                <div
-                    className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-5 p-6 animate-fade-in"
-                    style={{
-                        background: 'rgba(15, 15, 35, 0.95)',
-                        backdropFilter: 'blur(8px)',
-                    }}
-                >
-                    <span className="text-5xl">🎯</span>
-                    <h2 className="text-xl font-bold text-center" style={{ color: 'var(--cx-text-primary)' }}>
-                        Time to Refocus!
-                    </h2>
-                    <p className="text-sm text-center leading-relaxed max-w-xs" style={{ color: 'var(--cx-text-secondary)' }}>
-                        {overlayMessage}
-                    </p>
-                    <p className="text-xs" style={{ color: 'var(--cx-text-muted)' }}>
-                        📋 Your task: {task}
-                    </p>
-                    <button
-                        onClick={handleDismissOverlay}
-                        className="px-8 py-3 rounded-xl font-semibold text-sm text-white transition-colors cursor-pointer"
-                        style={{ background: 'var(--cx-accent)' }}
-                        onMouseOver={(e) => e.target.style.background = 'var(--cx-accent-hover)'}
-                        onMouseOut={(e) => e.target.style.background = 'var(--cx-accent)'}
-                    >
-                        ✅ I'm back — let me focus
-                    </button>
-                </div>
-            )}
+    const streakMins = Math.floor(streakSecs / 60);
 
-            {/* Focus Score Ring */}
-            <div className="flex flex-col items-center mt-2 mb-2 animate-fade-in">
-                <div
-                    className="w-28 h-28 rounded-full flex items-center justify-center mb-3"
-                    style={{
-                        background: `conic-gradient(${scoreColor} ${(score || 0) * 3.6}deg, var(--cx-bg-card) 0deg)`,
-                        padding: '4px',
-                    }}
-                >
+    return (
+        <div className="flex items-center justify-center h-full p-6 animate-fade-in">
+            <div className="w-full max-w-4xl flex flex-col md:flex-row gap-8 items-stretch">
+
+                {/* Left Column: Score Ring + State */}
+                <div className="flex flex-col items-center justify-center gap-4 md:w-64 shrink-0">
+                    {/* Focus Score Ring — large circular gauge */}
                     <div
-                        className="w-full h-full rounded-full flex flex-col items-center justify-center"
-                        style={{ background: 'var(--cx-bg-primary)' }}
+                        className="w-40 h-40 rounded-full flex items-center justify-center"
+                        style={{
+                            background: `conic-gradient(${scoreColorHex} ${(score || 0) * 3.6}deg, rgba(255,255,255,0.04) 0deg)`,
+                            padding: '5px',
+                        }}
                     >
-                        <span className="text-3xl font-extrabold" style={{ color: scoreColor }}>
-                            {score !== null ? score : '—'}
-                        </span>
-                        <span className="text-xs" style={{ color: 'var(--cx-text-muted)' }}>Focus</span>
+                        <div className="w-full h-full rounded-full flex flex-col items-center justify-center
+                                        bg-white dark:bg-[#0b0b0d]">
+                            <span className={`text-5xl font-extrabold ${scoreColor}`}>
+                                {score !== null ? score : '—'}
+                            </span>
+                            <span className="text-xs text-gray-400 dark:text-gray-500 mt-1">Focus Score</span>
+                        </div>
+                    </div>
+
+                    {/* State */}
+                    <span className={`text-sm font-semibold ${scoreColor}`}>
+                        {stateLabel[state] || state}
+                    </span>
+
+                    {/* Timer */}
+                    <span className="text-2xl font-mono font-bold text-gray-900 dark:text-gray-100">
+                        {formatTime(elapsed)}
+                    </span>
+                </div>
+
+                {/* Right Column: Task, Stats, Activity, Stop */}
+                <div className="flex-1 flex flex-col gap-4">
+                    {/* Task */}
+                    <div className="rounded-xl p-4 bg-gray-50 dark:bg-white/[0.03]
+                                    border border-gray-200 dark:border-white/[0.06]">
+                        <p className="text-xs mb-1 text-gray-400 dark:text-gray-500 uppercase tracking-widest font-semibold">
+                            Current Task
+                        </p>
+                        <p className="text-sm font-medium text-gray-800 dark:text-gray-200">
+                            📋 {task}
+                        </p>
+                    </div>
+
+                    {/* Stats Row */}
+                    <div className="grid grid-cols-3 gap-3">
+                        <div className="rounded-xl p-4 text-center bg-gray-50 dark:bg-white/[0.03]
+                                        border border-gray-200 dark:border-white/[0.06]">
+                            <p className="text-xs mb-1 text-gray-400 dark:text-gray-500">Credits</p>
+                            <p className="text-xl font-bold text-violet-500">💰 {credits}</p>
+                        </div>
+                        <div className="rounded-xl p-4 text-center bg-gray-50 dark:bg-white/[0.03]
+                                        border border-gray-200 dark:border-white/[0.06]">
+                            <p className="text-xs mb-1 text-gray-400 dark:text-gray-500">Current App</p>
+                            <p className="text-xs font-medium truncate text-gray-700 dark:text-gray-300">
+                                {appName || '—'}
+                            </p>
+                        </div>
+                        <div className="rounded-xl p-4 text-center bg-gray-50 dark:bg-white/[0.03]
+                                        border border-gray-200 dark:border-white/[0.06]">
+                            <p className="text-xs mb-1 text-gray-400 dark:text-gray-500">Distractions</p>
+                            <p className={`text-xl font-bold ${distractionCount > 3 ? 'text-red-500' : 'text-gray-700 dark:text-gray-300'}`}>
+                                {distractionCount}
+                            </p>
+                        </div>
+                    </div>
+
+                    {/* Activity + Streak badges */}
+                    <div className="flex items-center gap-3 flex-wrap">
+                        {activityType && (
+                            <span
+                                className={`text-xs font-medium px-3 py-1 rounded-full
+                                    ${interventionLevel > 0
+                                        ? 'bg-red-50 dark:bg-red-500/10 text-red-500'
+                                        : 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-500'
+                                    }`}
+                            >
+                                {activityType.replace(/_/g, ' ')}
+                            </span>
+                        )}
+
+                        {streakMins >= 1 && (
+                            <span
+                                className={`text-xs font-semibold px-3 py-1 rounded-full
+                                    ${streakMins >= 30 ? 'bg-red-50 dark:bg-red-500/10 text-red-500'
+                                        : streakMins >= 15 ? 'bg-orange-50 dark:bg-orange-500/10 text-orange-500'
+                                            : 'bg-amber-50 dark:bg-amber-500/10 text-amber-500'}`}
+                            >
+                                🔥 {streakMins}m streak
+                            </span>
+                        )}
+                    </div>
+
+                    {/* Stop Button — pushed to bottom */}
+                    <div className="mt-auto pt-4">
+                        <button
+                            onClick={handleStop}
+                            className={`w-full py-3 rounded-xl font-semibold text-sm cursor-pointer transition-all
+                                ${confirmStop
+                                    ? 'bg-red-500 text-white border border-red-500'
+                                    : 'bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-white/[0.08] hover:border-red-300 dark:hover:border-red-500/40'
+                                }`}
+                        >
+                            {confirmStop ? '⚠️ Tap again to confirm end' : '⏹ End Session'}
+                        </button>
                     </div>
                 </div>
-
-                <span className="text-sm font-medium" style={{ color: scoreColor }}>
-                    {stateLabel[state] || state}
-                </span>
-            </div>
-
-            {/* Task */}
-            <div
-                className="rounded-lg px-4 py-3"
-                style={{ background: 'var(--cx-bg-secondary)', border: '1px solid var(--cx-border)' }}
-            >
-                <p className="text-xs mb-1" style={{ color: 'var(--cx-text-muted)' }}>CURRENT TASK</p>
-                <p className="text-sm font-medium" style={{ color: 'var(--cx-text-primary)' }}>
-                    📋 {task}
-                </p>
-            </div>
-
-            {/* Stats Row */}
-            <div className="grid grid-cols-3 gap-3">
-                <div className="rounded-lg p-3 text-center" style={{ background: 'var(--cx-bg-card)' }}>
-                    <p className="text-xs mb-1" style={{ color: 'var(--cx-text-muted)' }}>Time</p>
-                    <p className="text-lg font-bold font-mono" style={{ color: 'var(--cx-text-primary)' }}>
-                        {formatTime(elapsed)}
-                    </p>
-                </div>
-                <div className="rounded-lg p-3 text-center" style={{ background: 'var(--cx-bg-card)' }}>
-                    <p className="text-xs mb-1" style={{ color: 'var(--cx-text-muted)' }}>Credits</p>
-                    <p className="text-lg font-bold" style={{ color: 'var(--cx-accent-light)' }}>
-                        💰 {credits}
-                    </p>
-                </div>
-                <div className="rounded-lg p-3 text-center" style={{ background: 'var(--cx-bg-card)' }}>
-                    <p className="text-xs mb-1" style={{ color: 'var(--cx-text-muted)' }}>Activity</p>
-                    <p className="text-xs font-medium truncate" style={{ color: 'var(--cx-text-secondary)' }}>
-                        {appName || '—'}
-                    </p>
-                </div>
-            </div>
-
-            {/* Activity Type Badge */}
-            {activityType && (
-                <div className="flex items-center gap-2 px-1">
-                    <span className="text-xs" style={{ color: 'var(--cx-text-muted)' }}>Detected:</span>
-                    <span
-                        className="text-xs font-medium px-2 py-0.5 rounded-full"
-                        style={{
-                            background: interventionLevel > 0 ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)',
-                            color: interventionLevel > 0 ? 'var(--cx-danger)' : 'var(--cx-success)',
-                        }}
-                    >
-                        {activityType.replace(/_/g, ' ')}
-                    </span>
-                </div>
-            )}
-
-            {/* Streak & Distraction Row */}
-            <div className="flex items-center gap-3 px-1">
-                {Math.floor(streakSecs / 60) >= 1 && (
-                    <span
-                        className="text-xs font-semibold px-2.5 py-1 rounded-full"
-                        style={{
-                            background: Math.floor(streakSecs / 60) >= 30
-                                ? 'rgba(239, 68, 68, 0.15)'
-                                : Math.floor(streakSecs / 60) >= 15
-                                    ? 'rgba(249, 115, 22, 0.15)'
-                                    : 'rgba(245, 158, 11, 0.15)',
-                            color: Math.floor(streakSecs / 60) >= 30
-                                ? '#EF4444'
-                                : Math.floor(streakSecs / 60) >= 15
-                                    ? '#F97316'
-                                    : '#F59E0B',
-                        }}
-                    >
-                        🔥 {Math.floor(streakSecs / 60)}m streak
-                    </span>
-                )}
-                {distractionCount > 0 && (
-                    <span className="text-[10px]" style={{ color: distractionCount > 3 ? '#EF4444' : 'rgba(255,255,255,0.4)' }}>
-                        {distractionCount} distraction{distractionCount !== 1 ? 's' : ''}
-                    </span>
-                )}
-            </div>
-
-            {/* Stop Button */}
-            <div className="mt-auto pb-2">
-                <button
-                    onClick={handleStop}
-                    className="w-full py-3 rounded-xl font-semibold text-sm transition-all cursor-pointer"
-                    style={{
-                        background: confirmStop ? 'var(--cx-danger)' : 'var(--cx-bg-card)',
-                        color: confirmStop ? 'white' : 'var(--cx-text-secondary)',
-                        border: `1px solid ${confirmStop ? 'var(--cx-danger)' : 'var(--cx-border)'}`,
-                    }}
-                >
-                    {confirmStop ? '⚠️ Tap again to confirm end' : '⏹ End Session'}
-                </button>
             </div>
         </div>
     );
