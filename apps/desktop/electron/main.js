@@ -126,10 +126,63 @@ function registerIpcHandlers() {
     });
 
     ipcMain.handle('acknowledgeIntervention', async () => {
-        intervention.acknowledge();
-        wsServer.sendCommand({ type: 'CLEAR' });
-        const newBalance = db.mutateCredits(5, 'self_correction');
-        return { credits: newBalance };
+        const result = session.handleSelfCorrection();
+        return { credits: result ? result.balance : 0, bonus: result ? result.bonus : 0 };
+    });
+
+    ipcMain.handle('intervention:dismiss', (event, level) => {
+        try {
+            if (typeof level !== 'number') return;
+            intervention.acknowledge();
+            session.emit('intervention:hide', {});
+        } catch (err) {
+            console.error('[ipc] intervention:dismiss failed:', err.message);
+        }
+    });
+
+    ipcMain.handle('intervention:selfCorrected', () => {
+        try {
+            return session.handleSelfCorrection();
+        } catch (err) {
+            console.error('[ipc] intervention:selfCorrected failed:', err.message);
+            return null;
+        }
+    });
+
+    ipcMain.handle('settings:getMode', () => {
+        try {
+            return intervention.getMode();
+        } catch (err) {
+            console.error('[ipc] settings:getMode failed:', err.message);
+            return 'balanced';
+        }
+    });
+
+    ipcMain.handle('settings:getAll', () => {
+        try {
+            return db.getAllSettings();
+        } catch (err) {
+            console.error('[ipc] settings:getAll failed:', err.message);
+            return {};
+        }
+    });
+
+    ipcMain.handle('settings:save', (event, data) => {
+        try {
+            if (!data || typeof data !== 'object') return;
+            for (const [key, value] of Object.entries(data)) {
+                if (typeof key !== 'string' || key.length > 100) continue;
+                db.setSetting(key, value);
+            }
+            // If mode changed, update the intervention engine
+            if (data.intervention_mode) {
+                intervention.setMode(data.intervention_mode);
+            }
+            return { success: true };
+        } catch (err) {
+            console.error('[ipc] settings:save failed:', err.message);
+            return { success: false };
+        }
     });
 
     ipcMain.handle('getCredits', () => {
@@ -203,6 +256,31 @@ function registerSessionEvents() {
     session.on('intervention', (data) => {
         if (mainWindow && mainWindow.webContents) {
             mainWindow.webContents.send('intervention', data);
+        }
+    });
+
+    // --- New intervention events ---
+    session.on('intervention:show', (data) => {
+        if (mainWindow && mainWindow.webContents) {
+            mainWindow.webContents.send('intervention:show', data);
+        }
+    });
+
+    session.on('intervention:hide', (data) => {
+        if (mainWindow && mainWindow.webContents) {
+            mainWindow.webContents.send('intervention:hide', data);
+        }
+    });
+
+    session.on('intervention:countdown', (data) => {
+        if (mainWindow && mainWindow.webContents) {
+            mainWindow.webContents.send('intervention:countdown', data);
+        }
+    });
+
+    session.on('intervention:forceClosed', (data) => {
+        if (mainWindow && mainWindow.webContents) {
+            mainWindow.webContents.send('intervention:forceClosed', data);
         }
     });
 

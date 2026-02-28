@@ -38,6 +38,7 @@ function initDatabase(userDataPath) {
         relevance_score INTEGER,
         confidence INTEGER,
         intervention_level INTEGER DEFAULT 0,
+        distraction_type TEXT,
         FOREIGN KEY (session_id) REFERENCES sessions(id)
       );
 
@@ -48,7 +49,28 @@ function initDatabase(userDataPath) {
         reason TEXT,
         balance_after INTEGER
       );
+
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
+
+        // Seed default settings (INSERT OR IGNORE so existing values are kept)
+        const defaults = {
+            intervention_mode: 'balanced',
+            mode_locked: 'false',
+            blur_intensity: 'medium',
+            toast_position: 'bottom-right',
+            force_close_delay: '30',
+            sound_alert: 'false',
+            app_whitelist: '[]',
+            app_blacklist: '[]',
+        };
+        const seedStmt = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
+        for (const [k, v] of Object.entries(defaults)) {
+            seedStmt.run(k, v);
+        }
 
         console.log('[database] Initialized at', dbPath);
     } catch (err) {
@@ -204,6 +226,52 @@ function getSessionActivities(sessionId) {
 }
 
 /**
+ * Get a single setting value by key.
+ * @param {string} key
+ * @returns {string|null}
+ */
+function getSetting(key) {
+    try {
+        const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+        return row ? row.value : null;
+    } catch (err) {
+        console.error('[database] getSetting failed:', err.message);
+        return null;
+    }
+}
+
+/**
+ * Set a single setting value.
+ * @param {string} key
+ * @param {string} value
+ */
+function setSetting(key, value) {
+    try {
+        db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, String(value));
+    } catch (err) {
+        console.error('[database] setSetting failed:', err.message);
+    }
+}
+
+/**
+ * Get all settings as a key-value object.
+ * @returns {object}
+ */
+function getAllSettings() {
+    try {
+        const rows = db.prepare('SELECT key, value FROM settings').all();
+        const result = {};
+        for (const row of rows) {
+            result[row.key] = row.value;
+        }
+        return result;
+    } catch (err) {
+        console.error('[database] getAllSettings failed:', err.message);
+        return {};
+    }
+}
+
+/**
  * Close the database connection.
  */
 function closeDatabase() {
@@ -227,5 +295,8 @@ module.exports = {
     mutateCredits,
     getRecentSessions,
     getSessionActivities,
+    getSetting,
+    setSetting,
+    getAllSettings,
     closeDatabase,
 };

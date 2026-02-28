@@ -15,6 +15,10 @@ contextBridge.exposeInMainWorld('electron', {
         // Intervention
         acknowledgeIntervention: () =>
             ipcRenderer.invoke('acknowledgeIntervention'),
+        dismissIntervention: (level) =>
+            ipcRenderer.invoke('intervention:dismiss', level),
+        selfCorrected: () =>
+            ipcRenderer.invoke('intervention:selfCorrected'),
 
         // Credits
         getCredits: () =>
@@ -27,6 +31,14 @@ contextBridge.exposeInMainWorld('electron', {
             ipcRenderer.invoke('getSessions'),
         getSessionActivities: (sessionId) =>
             ipcRenderer.invoke('getSessionActivities', sessionId),
+
+        // Settings
+        getMode: () =>
+            ipcRenderer.invoke('settings:getMode'),
+        getAllSettings: () =>
+            ipcRenderer.invoke('settings:getAll'),
+        saveSettings: (data) =>
+            ipcRenderer.invoke('settings:save', data),
 
         // Window Controls
         minimizeWindow: () =>
@@ -48,6 +60,10 @@ contextBridge.exposeInMainWorld('electron', {
             'showOverlay',
             'creditUpdate',
             'intervention',
+            'intervention:show',
+            'intervention:hide',
+            'intervention:countdown',
+            'intervention:forceClosed',
         ];
         if (validChannels.includes(channel)) {
             const subscription = (event, ...args) => callback(...args);

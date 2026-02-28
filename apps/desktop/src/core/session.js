@@ -27,6 +27,14 @@ class SessionManager extends EventEmitter {
         this.interventionsCount = 0;
         this.lastFocusBlockTime = null;
 
+        // Streak & distraction tracking
+        this.currentStreakSecs = 0;
+        this.lastStreakCheckTime = null;
+        this.distractionCount = 0;
+        this.totalDistractedSecs = 0;
+        this._lastDistractionStartTime = null;
+        this._interventionShownAt = null;   // timestamp when overlay was shown
+
         // Layer 1 & 2 detectors
         this._processScanner = new ProcessScanner();
         this._windowWatcher = new WindowWatcher();
@@ -34,6 +42,44 @@ class SessionManager extends EventEmitter {
         this._lastLayerCategory = null;
         this._lastLayerApp = null;
         this._immediateCaptureRequested = false;
+
+        // Wire up intervention engine events
+        this._wireInterventionEvents();
+    }
+
+    /**
+     * Wire up events from the intervention engine (countdown ticks, force-close, etc.)
+     * @private
+     */
+    _wireInterventionEvents() {
+        intervention.on('intervention:warning', (data) => {
+            this.emit('intervention:show', {
+                ...data,
+                level: 3,
+                streakSecs: this.currentStreakSecs,
+                distractionCount: this.distractionCount,
+                task: this.taskText,
+            });
+        });
+
+        intervention.on('intervention:countdown:tick', (data) => {
+            this.emit('intervention:countdown', data);
+        });
+
+        intervention.on('intervention:forceClosed', (data) => {
+            this.emit('intervention:forceClosed', data);
+            this.emit('intervention:hide', {});
+            // Log the force close
+            db.logActivity(this.sessionId, {
+                timestamp: Date.now(),
+                activity_type: 'FORCE_CLOSED',
+                app_name: data.appName,
+                relevance_score: 0,
+                confidence: 100,
+                intervention_level: 5,
+                distraction_type: `FORCE_${data.action.toUpperCase()}`,
+            });
+        });
     }
 
     /**
@@ -65,9 +111,22 @@ class SessionManager extends EventEmitter {
             this.creditsEarned = 0;
             this.interventionsCount = 0;
             this.lastFocusBlockTime = Date.now();
+            this.currentStreakSecs = 0;
+            this.lastStreakCheckTime = Date.now();
+            this.distractionCount = 0;
+            this.totalDistractedSecs = 0;
+            this._lastDistractionStartTime = null;
+            this._interventionShownAt = null;
+
+            // Load mode from database
+            const savedMode = db.getSetting('intervention_mode') || 'balanced';
+            intervention.setMode(savedMode);
 
             inputMonitor.startMonitoring();
             intervention.reset();
+
+            // Start streak tracking timer
+            this._startStreakTimer();
 
             // Start Layer 1 & 2 detectors
             this._startDetectors();
@@ -173,7 +232,7 @@ class SessionManager extends EventEmitter {
             else if (category === 'FOCUS') activityType = 'STUDY';
 
             // Feed into intervention FSM
-            const action = intervention.processScore(score, activityType, confidence);
+            const action = intervention.processScore(score, activityType, confidence, appName);
 
             // Log to database
             db.logActivity(this.sessionId, {
@@ -184,6 +243,13 @@ class SessionManager extends EventEmitter {
                 confidence: confidence,
                 intervention_level: action ? action.level : 0,
             });
+
+            // Track distraction / streak
+            if (score < 70) {
+                this._onDistraction(appName);
+            } else {
+                this._onFocusRestore();
+            }
 
             // Dispatch action or award credits
             if (action) {
@@ -204,7 +270,10 @@ class SessionManager extends EventEmitter {
                 interventionLevel: action ? action.level : 0,
                 state: intervention.getState(),
                 focusSeconds: this.focusSeconds,
+                streakSecs: this.currentStreakSecs,
+                distractionCount: this.distractionCount,
                 elapsed: Date.now() - this.startTime,
+                mode: intervention.getMode(),
             });
 
             // Send focus score to Chrome extension
@@ -215,6 +284,46 @@ class SessionManager extends EventEmitter {
             });
         } catch (err) {
             console.error('[session] _handleInstantDetection failed:', err.message);
+        }
+    }
+
+    /**
+     * Start a timer that increments currentStreakSecs every second while focused.
+     * @private
+     */
+    _startStreakTimer() {
+        this._streakInterval = setInterval(() => {
+            if (!this.sessionActive) return;
+            if (intervention.getState() === 'MONITORING' || intervention.getState() === 'IDLE') {
+                this.currentStreakSecs++;
+            }
+        }, 1000);
+    }
+
+    /**
+     * Called on every distraction detection.
+     * @param {string} appName
+     * @private
+     */
+    _onDistraction(appName) {
+        // Only count as a new distraction if we were previously focused
+        if (this._lastDistractionStartTime === null) {
+            this.distractionCount++;
+            this._lastDistractionStartTime = Date.now();
+        }
+        // Reset streak
+        this.currentStreakSecs = 0;
+    }
+
+    /**
+     * Called when focus is restored.
+     * @private
+     */
+    _onFocusRestore() {
+        if (this._lastDistractionStartTime !== null) {
+            const distractedMs = Date.now() - this._lastDistractionStartTime;
+            this.totalDistractedSecs += Math.floor(distractedMs / 1000);
+            this._lastDistractionStartTime = null;
         }
     }
 
@@ -270,8 +379,16 @@ class SessionManager extends EventEmitter {
                 const action = intervention.processScore(
                     analysis.relevance_score,
                     analysis.activity_type,
-                    analysis.confidence
+                    analysis.confidence,
+                    analysis.app_name
                 );
+
+                // Track distraction / streak
+                if (analysis.relevance_score < 70) {
+                    this._onDistraction(analysis.app_name);
+                } else {
+                    this._onFocusRestore();
+                }
 
                 // Log to database
                 db.logActivity(this.sessionId, {
@@ -311,7 +428,10 @@ class SessionManager extends EventEmitter {
                     interventionLevel: action ? action.level : 0,
                     state: intervention.getState(),
                     focusSeconds: this.focusSeconds,
+                    streakSecs: this.currentStreakSecs,
+                    distractionCount: this.distractionCount,
                     elapsed: Date.now() - this.startTime,
+                    mode: intervention.getMode(),
                 });
 
                 // Send focus score to Chrome extension popup
@@ -351,10 +471,12 @@ class SessionManager extends EventEmitter {
 
     /**
      * Dispatch an intervention action.
-     * @param {object} action - { level, type, message }
+     * @param {object} action - mode-aware action from InterventionEngine
      */
     _dispatchAction(action) {
         try {
+            this._interventionShownAt = Date.now();
+
             switch (action.type) {
                 case 'TOAST':
                     notifier.notify({
@@ -363,17 +485,64 @@ class SessionManager extends EventEmitter {
                         icon: undefined,
                         timeout: 8,
                     });
-                    break;
-
-                case 'OVERLAY':
-                    this.emit('showOverlay', {
-                        message: action.message,
+                    // Also emit to renderer for gentle overlay
+                    this.emit('intervention:show', {
                         level: action.level,
+                        mode: action.mode,
+                        appName: action.appName,
+                        message: action.message,
+                        streakSecs: this.currentStreakSecs,
+                        distractionCount: this.distractionCount,
+                        countdownSecs: 0,
+                        blurPx: action.blurPx,
+                        bgOpacity: action.bgOpacity,
+                        buttonDelay: action.buttonDelay,
+                        position: action.position,
+                        creditsEnabled: action.creditsEnabled,
+                        task: this.taskText,
                     });
                     break;
 
+                case 'OVERLAY':
+                    this.emit('intervention:show', {
+                        level: action.level,
+                        mode: action.mode,
+                        appName: action.appName,
+                        message: action.message,
+                        streakSecs: this.currentStreakSecs,
+                        distractionCount: this.distractionCount,
+                        countdownSecs: action.countdownSecs || 0,
+                        blurPx: action.blurPx,
+                        bgOpacity: action.bgOpacity,
+                        buttonDelay: action.buttonDelay,
+                        position: action.position,
+                        creditsEnabled: action.creditsEnabled,
+                        task: this.taskText,
+                    });
+                    break;
+
+                case 'FORCE_CLOSE_WARNING':
+                    this.emit('intervention:show', {
+                        level: action.level,
+                        mode: action.mode,
+                        appName: action.appName,
+                        message: action.message,
+                        streakSecs: this.currentStreakSecs,
+                        distractionCount: this.distractionCount,
+                        countdownSecs: action.countdownSecs,
+                        blurPx: action.blurPx,
+                        bgOpacity: action.bgOpacity,
+                        buttonDelay: action.buttonDelay,
+                        position: action.position,
+                        creditsEnabled: action.creditsEnabled,
+                        task: this.taskText,
+                    });
+                    // Start the main-process force-close countdown
+                    const processName = action.appName ? `${action.appName}.exe` : '';
+                    intervention.handleForceClose(action.appName, processName);
+                    break;
+
                 case 'MEDIA_PAUSE':
-                    // Emit to main process to send OS media key
                     this.emit('mediaPause');
                     break;
 
@@ -390,10 +559,44 @@ class SessionManager extends EventEmitter {
                     console.warn('[session] Unknown action type:', action.type);
             }
 
-            this.emit('intervention', { level: action.level, type: action.type, message: action.message });
-            console.log(`[session] Dispatched Level ${action.level} intervention: ${action.type}`);
+            this.emit('intervention', { level: action.level, type: action.type, message: action.message, mode: action.mode });
+            console.log(`[session] Dispatched L${action.level} intervention: ${action.type} (${action.mode} mode)`);
         } catch (err) {
             console.error('[session] _dispatchAction failed:', err.message);
+        }
+    }
+
+    /**
+     * Handle self-correction: user clicked "I'm Back" quickly.
+     * Awards bonus credits if within 15 seconds.
+     * @returns {{bonus: number, balance: number}|null}
+     */
+    handleSelfCorrection() {
+        try {
+            let bonus = 0;
+            const elapsed = this._interventionShownAt
+                ? (Date.now() - this._interventionShownAt) / 1000
+                : 999;
+
+            if (elapsed <= 15) {
+                bonus = 5;
+                const newBalance = db.mutateCredits(5, 'self_correction');
+                this.creditsEarned += 5;
+                this.emit('creditUpdate', { balance: newBalance, earned: 5, reason: 'self_correction' });
+                console.log('[session] Self-correction bonus awarded: +5 credits');
+            }
+
+            // Acknowledge the intervention
+            intervention.acknowledge();
+            wsServer.sendCommand({ type: 'CLEAR' });
+            this.emit('intervention:hide', {});
+            this._interventionShownAt = null;
+            this._onFocusRestore();
+
+            return { bonus, balance: db.getCreditsBalance() };
+        } catch (err) {
+            console.error('[session] handleSelfCorrection failed:', err.message);
+            return null;
         }
     }
 
@@ -410,6 +613,12 @@ class SessionManager extends EventEmitter {
 
             this.sessionActive = false;
             inputMonitor.stopMonitoring();
+
+            // Stop streak timer
+            if (this._streakInterval) {
+                clearInterval(this._streakInterval);
+                this._streakInterval = null;
+            }
 
             // Stop Layer 1 & 2 detectors
             this._processScanner.stop();
@@ -430,6 +639,8 @@ class SessionManager extends EventEmitter {
                 focusPercent: elapsed > 0 ? Math.round((this.focusSeconds / (elapsed / 1000)) * 100) : 0,
                 creditsEarned: this.creditsEarned,
                 interventionsCount: this.interventionsCount,
+                distractionCount: this.distractionCount,
+                totalDistractedSecs: this.totalDistractedSecs,
                 creditsBalance: db.getCreditsBalance(),
             };
 
@@ -451,6 +662,9 @@ class SessionManager extends EventEmitter {
             this.taskText = '';
             this.history = [];
             this.startTime = null;
+            this.currentStreakSecs = 0;
+            this.distractionCount = 0;
+            this.totalDistractedSecs = 0;
 
             return summary;
         } catch (err) {
