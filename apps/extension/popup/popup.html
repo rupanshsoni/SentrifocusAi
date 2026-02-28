@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      width: 280px;
+      min-height: 160px;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .header .icon {
+      font-size: 20px;
+    }
+    .header h1 {
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #EF4444;
+    }
+    .status-dot.connected {
+      background: #10B981;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 13px;
+    }
+    .info-label {
+      color: rgba(255, 255, 255, 0.5);
+    }
+    .info-value {
+      font-weight: 600;
+      color: #fff;
+    }
+    .score-good { color: #10B981; }
+    .score-warn { color: #F59E0B; }
+    .score-bad { color: #EF4444; }
+    .task-text {
+      font-size: 12px;
+      line-height: 1.4;
+      color: rgba(255, 255, 255, 0.7);
+      margin-top: 12px;
+      padding: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 6px;
+      word-break: break-word;
+    }
+    .no-session {
+      text-align: center;
+      color: rgba(255, 255, 255, 0.4);
+      font-size: 13px;
+      padding: 16px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span class="icon">🧠</span>
+    <h1>CognitionX</h1>
+  </div>
+
+  <div class="status">
+    <span id="status-dot" class="status-dot"></span>
+    <span id="status-text">Disconnected</span>
+  </div>
+
+  <div id="session-info" style="display: none;">
+    <div class="info-row">
+      <span class="info-label">Focus Score</span>
+      <span id="score-value" class="info-value">—</span>
+    </div>
+    <div id="task-display" class="task-text"></div>
+  </div>
+
+  <div id="no-session" class="no-session">
+    No active session. Start one from the desktop app.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
