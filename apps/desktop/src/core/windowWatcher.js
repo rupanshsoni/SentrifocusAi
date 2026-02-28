@@ -8,7 +8,7 @@ let ActiveWindow = null;
 try {
     ActiveWindow = require('@paymoapp/active-window').ActiveWindow;
 } catch (err) {
-    console.warn('[windowWatcher] @paymoapp/active-window not available:', err.message);
+    console.warn('[WindowWatcher] @paymoapp/active-window not available:', err.message);
 }
 
 /**
@@ -18,6 +18,9 @@ try {
  * and matches against rulesets for instant scoring. Emits events used
  * by the session manager to trigger immediate screenshots or bypass
  * the AI pipeline entirely.
+ *
+ * For UWP/Store apps where application field is empty or 'ApplicationFrameHost',
+ * falls back to matching against window title via TITLE_FALLBACK_RULES.
  *
  * Latency: ~1 second from window switch to detection.
  */
@@ -30,6 +33,7 @@ class WindowWatcher extends EventEmitter {
         this._lastApp = '';
         this._titleUnchangedSince = 0;
         this._sessionTask = '';
+        this._pollCount = 0;
     }
 
     /**
@@ -40,7 +44,7 @@ class WindowWatcher extends EventEmitter {
         try {
             if (this._interval) return;
             if (!ActiveWindow) {
-                console.warn('[windowWatcher] Cannot start — active-window module not loaded');
+                console.warn('[WindowWatcher] Cannot start — active-window module not loaded');
                 return;
             }
 
@@ -49,13 +53,16 @@ class WindowWatcher extends EventEmitter {
             this._lastTitle = '';
             this._lastApp = '';
             this._titleUnchangedSince = Date.now();
+            this._pollCount = 0;
+
+            console.log('[WindowWatcher] ✓ start() called — polling active window every 1s');
 
             // Fire first check immediately
             this._poll();
             this._interval = setInterval(() => this._poll(), 1000);
-            console.log('[windowWatcher] Started');
+            console.log('[WindowWatcher] Started');
         } catch (err) {
-            console.error('[windowWatcher] start failed:', err.message);
+            console.error('[WindowWatcher] start failed:', err.message);
         }
     }
 
@@ -71,9 +78,9 @@ class WindowWatcher extends EventEmitter {
             this._lastWindow = null;
             this._lastTitle = '';
             this._lastApp = '';
-            console.log('[windowWatcher] Stopped');
+            console.log('[WindowWatcher] Stopped');
         } catch (err) {
-            console.error('[windowWatcher] stop failed:', err.message);
+            console.error('[WindowWatcher] stop failed:', err.message);
         }
     }
 
@@ -93,11 +100,26 @@ class WindowWatcher extends EventEmitter {
         try {
             if (!ActiveWindow) return;
 
+            this._pollCount++;
             const win = ActiveWindow.getActiveWindow();
-            if (!win) return;
+            if (!win) {
+                if (this._pollCount <= 3) {
+                    console.warn('[WindowWatcher] getActiveWindow() returned null');
+                }
+                return;
+            }
 
             const title = (win.title || '').toLowerCase();
             const application = (win.application || win.name || '').toLowerCase();
+            const rawPath = win.path || '';
+
+            // Extract exe name from path (e.g. "C:\...\Code.exe" → "code.exe")
+            const exeFromPath = rawPath ? rawPath.split(/[\\/]/).pop().toLowerCase() : '';
+
+            // Log raw data on first 3 polls and every 30th poll
+            if (this._pollCount <= 3 || this._pollCount % 30 === 0) {
+                console.log(`[WindowWatcher] Poll #${this._pollCount} raw: { title: "${(win.title || '').substring(0, 80)}", application: "${win.application || win.name || ''}", path: "${rawPath.substring(0, 80)}", exe: "${exeFromPath}" }`);
+            }
 
             // Detect window change
             const appChanged = application !== this._lastApp;
@@ -107,7 +129,9 @@ class WindowWatcher extends EventEmitter {
                 // Title changed — reset unchanged timer
                 this._titleUnchangedSince = Date.now();
 
-                const evaluation = this._evaluate(title, application);
+                console.log(`[WindowWatcher] Active window changed: app="${application}", exe="${exeFromPath}", title="${title.substring(0, 80)}"`);
+
+                const evaluation = this._evaluate(title, application, exeFromPath);
                 const windowInfo = {
                     title: win.title || '',
                     application: win.application || win.name || '',
@@ -115,7 +139,14 @@ class WindowWatcher extends EventEmitter {
                 };
                 this._lastWindow = windowInfo;
 
+                if (evaluation) {
+                    console.log(`[WindowWatcher] Evaluation: score=${evaluation.score}, category=${evaluation.category}, label=${evaluation.label}, source=${evaluation.source}`);
+                } else {
+                    console.log(`[WindowWatcher] Evaluation: null (unknown app — needs Gemini)`);
+                }
+
                 // Always emit window:changed for screenshot trigger
+                console.log(`[WindowWatcher] >>> Emitting window:changed`);
                 this.emit('window:changed', {
                     from: { title: this._lastTitle, application: this._lastApp },
                     to: windowInfo,
@@ -145,33 +176,64 @@ class WindowWatcher extends EventEmitter {
             }
         } catch (err) {
             // Silent fail — never crash the main process
-            console.warn('[windowWatcher] _poll error:', err.message);
+            console.warn('[WindowWatcher] _poll error:', err.message);
         }
+    }
+
+    /**
+     * Check if application looks like a UWP/Store app host or is empty.
+     * @param {string} application - Lowercase application name
+     * @returns {boolean}
+     * @private
+     */
+    _isUWPHost(application) {
+        if (!application) return true;
+        return application === 'applicationframehost' ||
+               application === 'applicationframehost.exe' ||
+               application === '';
     }
 
     /**
      * Evaluate the current window against rulesets.
      * @param {string} title - Lowercase window title
-     * @param {string} application - Lowercase application name
+     * @param {string} application - Lowercase application name (display name from OS)
+     * @param {string} exeFromPath - Lowercase exe filename extracted from path (e.g. "code.exe")
      * @returns {{ score: number, category: string, label: string, source: string } | null}
      * @private
      */
-    _evaluate(title, application) {
+    _evaluate(title, application, exeFromPath) {
         try {
-            // 1. Check if it's a browser
-            if (rulesets.isBrowser(application)) {
+            // 1. Check if it's a browser (by display name OR exe name)
+            if (rulesets.isBrowser(application) || rulesets.isBrowser(exeFromPath)) {
                 // Match the browser tab title against BROWSER_TITLE_RULES
                 const titleMatch = rulesets.matchBrowserTitle(title);
                 if (titleMatch) {
+                    console.log(`[WindowWatcher] Browser title match: "${title.substring(0, 60)}" → ${titleMatch.label} (score: ${titleMatch.score})`);
                     return { ...titleMatch, source: 'browser_title' };
                 }
                 // No title match → unknown browser content → needs Gemini
+                console.log(`[WindowWatcher] Browser detected but no title rule match for: "${title.substring(0, 60)}"`);
                 return { score: -1, category: 'BROWSE_UNKNOWN', label: 'Unknown browser tab', source: 'browser_unknown' };
             }
 
-            // 2. Non-browser app → check PROCESS_RULES by application name
+            // 2. Try matching by exe name from path (most reliable on Windows)
+            if (exeFromPath) {
+                const exeMatch = rulesets.matchProcess(exeFromPath);
+                if (exeMatch) {
+                    console.log(`[WindowWatcher] Process rule match (exe from path): "${exeFromPath}" → ${exeMatch.displayName} (score: ${exeMatch.score})`);
+                    return {
+                        score: exeMatch.score,
+                        category: exeMatch.category,
+                        label: exeMatch.displayName,
+                        source: 'process_rule',
+                    };
+                }
+            }
+
+            // 3. Try matching by application display name
             const processMatch = rulesets.matchProcess(application);
             if (processMatch) {
+                console.log(`[WindowWatcher] Process rule match (display name): "${application}" → ${processMatch.displayName} (score: ${processMatch.score})`);
                 return {
                     score: processMatch.score,
                     category: processMatch.category,
@@ -180,23 +242,53 @@ class WindowWatcher extends EventEmitter {
                 };
             }
 
-            // 3. Try matching the exe name from the application field
-            // Sometimes application is like "code" not "code.exe"
+            // 4. Try with .exe suffix on display name
             const withExe = application.endsWith('.exe') ? application : application + '.exe';
-            const exeMatch = rulesets.matchProcess(withExe);
-            if (exeMatch) {
+            const exeMatch2 = rulesets.matchProcess(withExe);
+            if (exeMatch2) {
+                console.log(`[WindowWatcher] Process rule match (display name + .exe): "${withExe}" → ${exeMatch2.displayName} (score: ${exeMatch2.score})`);
                 return {
-                    score: exeMatch.score,
-                    category: exeMatch.category,
-                    label: exeMatch.displayName,
+                    score: exeMatch2.score,
+                    category: exeMatch2.category,
+                    label: exeMatch2.displayName,
                     source: 'process_rule',
                 };
             }
 
-            // 4. Unknown app → needs Gemini
+            // 5. UWP / Store app fallback — if application is empty or ApplicationFrameHost,
+            //    match against window TITLE using TITLE_FALLBACK_RULES
+            if (this._isUWPHost(application) || this._isUWPHost(exeFromPath)) {
+                const titleFallback = rulesets.matchTitleFallback(title);
+                if (titleFallback) {
+                    console.log(`[WindowWatcher] UWP title fallback match: "${title.substring(0, 60)}" → ${titleFallback.displayName} (score: ${titleFallback.score})`);
+                    return {
+                        score: titleFallback.score,
+                        category: titleFallback.category,
+                        label: titleFallback.displayName,
+                        source: 'title_fallback_uwp',
+                    };
+                }
+                console.log(`[WindowWatcher] UWP app with no title fallback: app="${application}", exe="${exeFromPath}", title="${title.substring(0, 60)}"`);
+            }
+
+            // 6. Last resort: even for non-UWP, try title fallback
+            //    (some apps report odd application names)
+            const titleFallback = rulesets.matchTitleFallback(title);
+            if (titleFallback) {
+                console.log(`[WindowWatcher] Title fallback match (non-UWP): "${title.substring(0, 60)}" → ${titleFallback.displayName} (score: ${titleFallback.score})`);
+                return {
+                    score: titleFallback.score,
+                    category: titleFallback.category,
+                    label: titleFallback.displayName,
+                    source: 'title_fallback',
+                };
+            }
+
+            // 7. Unknown app → needs Gemini
+            console.log(`[WindowWatcher] No match found: app="${application}", exe="${exeFromPath}", title="${title.substring(0, 60)}" → needs Gemini`);
             return null;
         } catch (err) {
-            console.warn('[windowWatcher] _evaluate error:', err.message);
+            console.warn('[WindowWatcher] _evaluate error:', err.message);
             return null;
         }
     }
@@ -220,27 +312,27 @@ class WindowWatcher extends EventEmitter {
 
             if (evaluation.score === -1) {
                 // Ambiguous — needs Gemini (e.g. YouTube, Twitch)
+                console.log(`[WindowWatcher] >>> Emitting window:ambiguous — ${evaluation.label} — "${windowInfo.title.substring(0, 60)}"`);
                 this.emit('window:ambiguous', data);
-                console.log(`[windowWatcher] AMBIGUOUS: ${evaluation.label} — "${windowInfo.title}"`);
             } else if (evaluation.score === 0) {
                 // Instant distraction
+                console.log(`[WindowWatcher] >>> Emitting window:distraction:instant — ${evaluation.label}`);
                 this.emit('window:distraction:instant', data);
-                console.log(`[windowWatcher] INSTANT distraction: ${evaluation.label}`);
             } else if (evaluation.score > 0 && evaluation.score <= 40) {
                 // Soft distraction
+                console.log(`[WindowWatcher] >>> Emitting window:distraction:soft — ${evaluation.label} (score: ${evaluation.score})`);
                 this.emit('window:distraction:soft', data);
-                console.log(`[windowWatcher] Soft distraction: ${evaluation.label} (score: ${evaluation.score})`);
             } else if (evaluation.score >= 70) {
                 // Focus app/site
+                console.log(`[WindowWatcher] >>> Emitting window:focus — ${evaluation.label} (score: ${evaluation.score})`);
                 this.emit('window:focus', data);
-                console.log(`[windowWatcher] FOCUS: ${evaluation.label} (score: ${evaluation.score})`);
             } else {
                 // Middle range (41-69) → ambiguous
+                console.log(`[WindowWatcher] >>> Emitting window:ambiguous (mid-range) — ${evaluation.label} (score: ${evaluation.score})`);
                 this.emit('window:ambiguous', data);
-                console.log(`[windowWatcher] Ambiguous range: ${evaluation.label} (score: ${evaluation.score})`);
             }
         } catch (err) {
-            console.warn('[windowWatcher] _emitDetection error:', err.message);
+            console.warn('[WindowWatcher] _emitDetection error:', err.message);
         }
     }
 }

@@ -11,6 +11,9 @@ const { PROCESS_RULES } = require('./rulesets');
  * known distraction/focus process names. Emits events for instant
  * detection without needing screenshots or AI.
  *
+ * On Windows, runs BOTH tasklist and Get-Process to catch Store/UWP apps
+ * that tasklist /FO CSV sometimes misses.
+ *
  * Latency: ~500ms from process launch to detection.
  */
 class ProcessScanner extends EventEmitter {
@@ -20,6 +23,7 @@ class ProcessScanner extends EventEmitter {
         this._previousProcesses = new Set();
         this._lastResult = null;
         this._sessionTask = '';
+        this._scanCount = 0;
     }
 
     /**
@@ -32,13 +36,16 @@ class ProcessScanner extends EventEmitter {
             this._sessionTask = sessionTask || '';
             this._previousProcesses = new Set();
             this._lastResult = null;
+            this._scanCount = 0;
+
+            console.log('[ProcessScanner] ✓ start() called — beginning process polling every 2s');
 
             // Fire first scan immediately
             this._scan();
             this._interval = setInterval(() => this._scan(), 2000);
-            console.log('[processScanner] Started');
+            console.log('[ProcessScanner] Started');
         } catch (err) {
-            console.error('[processScanner] start failed:', err.message);
+            console.error('[ProcessScanner] start failed:', err.message);
         }
     }
 
@@ -53,9 +60,9 @@ class ProcessScanner extends EventEmitter {
             }
             this._previousProcesses = new Set();
             this._lastResult = null;
-            console.log('[processScanner] Stopped');
+            console.log('[ProcessScanner] Stopped');
         } catch (err) {
-            console.error('[processScanner] stop failed:', err.message);
+            console.error('[ProcessScanner] stop failed:', err.message);
         }
     }
 
@@ -69,32 +76,108 @@ class ProcessScanner extends EventEmitter {
 
     /**
      * Perform a single process scan.
+     * On Windows: runs tasklist AND Get-Process, merges results.
      * @private
      */
     _scan() {
         try {
+            this._scanCount++;
             const isWindows = process.platform === 'win32';
-            const command = isWindows
-                ? 'tasklist /FO CSV /NH'
-                : 'ps -axco command';
 
-            exec(command, { timeout: 3000, maxBuffer: 1024 * 512 }, (err, stdout) => {
-                if (err) {
-                    // Silent fail — don't crash the app
-                    console.warn('[processScanner] exec error:', err.message);
-                    return;
-                }
-
-                try {
-                    const runningProcesses = this._parseProcessList(stdout, isWindows);
-                    this._evaluate(runningProcesses);
-                } catch (parseErr) {
-                    console.warn('[processScanner] parse error:', parseErr.message);
-                }
-            });
+            if (isWindows) {
+                this._scanWindows();
+            } else {
+                const command = 'ps -axco command';
+                exec(command, { timeout: 3000, maxBuffer: 1024 * 512 }, (err, stdout) => {
+                    if (err) {
+                        console.warn('[ProcessScanner] exec error:', err.message);
+                        return;
+                    }
+                    try {
+                        const runningProcesses = this._parseProcessList(stdout, false);
+                        console.log(`[ProcessScanner] Scan #${this._scanCount}: found ${runningProcesses.size} processes`);
+                        this._evaluate(runningProcesses);
+                    } catch (parseErr) {
+                        console.warn('[ProcessScanner] parse error:', parseErr.message);
+                    }
+                });
+            }
         } catch (err) {
-            console.error('[processScanner] _scan failed:', err.message);
+            console.error('[ProcessScanner] _scan failed:', err.message);
         }
+    }
+
+    /**
+     * Windows-specific scan: runs tasklist AND Get-Process in parallel,
+     * merges results to catch Store/UWP apps.
+     * @private
+     */
+    _scanWindows() {
+        const tasklistCmd = 'tasklist /FO CSV /NH';
+        const psCmd = 'powershell -NoProfile -Command "Get-Process | Select-Object -ExpandProperty Name"';
+
+        let tasklistDone = false;
+        let psDone = false;
+        const tasklistProcesses = new Set();
+        const psProcesses = new Set();
+
+        const tryMerge = () => {
+            if (!tasklistDone || !psDone) return;
+
+            // Merge both sets
+            const merged = new Set([...tasklistProcesses, ...psProcesses]);
+
+            // Log diagnostics every 5th scan (not every 2s to reduce noise)
+            if (this._scanCount % 5 === 1) {
+                const psOnly = [...psProcesses].filter(p => !tasklistProcesses.has(p));
+                if (psOnly.length > 0) {
+                    console.log(`[ProcessScanner] Get-Process found ${psOnly.length} extra processes not in tasklist: ${psOnly.slice(0, 10).join(', ')}`);
+                }
+                console.log(`[ProcessScanner] Scan #${this._scanCount}: tasklist=${tasklistProcesses.size}, Get-Process=${psProcesses.size}, merged=${merged.size}`);
+            }
+
+            this._evaluate(merged);
+        };
+
+        // Run tasklist
+        exec(tasklistCmd, { timeout: 3000, maxBuffer: 1024 * 512 }, (err, stdout) => {
+            if (err) {
+                console.warn('[ProcessScanner] tasklist error:', err.message);
+            } else {
+                try {
+                    const parsed = this._parseProcessList(stdout, true);
+                    for (const p of parsed) tasklistProcesses.add(p);
+                } catch (e) {
+                    console.warn('[ProcessScanner] tasklist parse error:', e.message);
+                }
+            }
+            tasklistDone = true;
+            tryMerge();
+        });
+
+        // Run Get-Process (catches Store/UWP apps)
+        exec(psCmd, { timeout: 4000, maxBuffer: 1024 * 512 }, (err, stdout) => {
+            if (err) {
+                console.warn('[ProcessScanner] Get-Process error:', err.message);
+            } else {
+                try {
+                    const lines = stdout.split('\n');
+                    for (const line of lines) {
+                        const trimmed = line.trim().toLowerCase();
+                        if (!trimmed) continue;
+                        // Get-Process returns names without .exe — add both forms
+                        psProcesses.add(trimmed);
+                        if (!trimmed.endsWith('.exe')) {
+                            psProcesses.add(trimmed + '.exe');
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[ProcessScanner] Get-Process parse error:', e.message);
+                }
+            }
+            psDone = true;
+            tryMerge();
+        });
     }
 
     /**
@@ -149,7 +232,12 @@ class ProcessScanner extends EventEmitter {
                 const rule = PROCESS_RULES[procName];
                 if (!rule) continue;
 
-                if (rule.score <= 30) {
+                // Log every match on first scan, then every 15th scan
+                if (this._scanCount === 1 || this._scanCount % 15 === 0) {
+                    console.log(`[ProcessScanner] Checking: ${procName} → match: ${rule.displayName} (score: ${rule.score}, cat: ${rule.category})`);
+                }
+
+                if (rule.score >= 0 && rule.score <= 30) {
                     distractions.push({ processName: procName, ...rule });
                     worstScore = Math.min(worstScore, rule.score);
                 }
@@ -160,6 +248,17 @@ class ProcessScanner extends EventEmitter {
             }
 
             this._lastResult = { distractions, focusApps, worstScore, bestScore };
+
+            // Summary log on first scan
+            if (this._scanCount === 1) {
+                console.log(`[ProcessScanner] First scan summary: ${distractions.length} distractions, ${focusApps.length} focus apps`);
+                if (distractions.length > 0) {
+                    console.log(`[ProcessScanner]   Distractions: ${distractions.map(d => d.displayName).join(', ')}`);
+                }
+                if (focusApps.length > 0) {
+                    console.log(`[ProcessScanner]   Focus apps: ${focusApps.map(f => f.displayName).join(', ')}`);
+                }
+            }
 
             // Detect NEW processes that weren't in the previous scan
             const newProcesses = new Set();
@@ -174,21 +273,33 @@ class ProcessScanner extends EventEmitter {
                 const rule = PROCESS_RULES[procName];
                 if (!rule) continue;
 
+                // Skip ambiguous UWP marker — it's handled by WindowWatcher title fallback
+                if (rule.score === -1) continue;
+
                 if (rule.score === 0) {
+                    console.log(`[ProcessScanner] >>> Emitting instant:distraction for ${rule.displayName} (${procName})`);
                     this.emit('instant:distraction', {
                         processName: procName,
                         displayName: rule.displayName,
                         score: 0,
                         category: rule.category,
                     });
-                    console.log(`[processScanner] INSTANT distraction: ${rule.displayName} (${procName})`);
-                } else if (rule.score >= 80) {
+                } else if (rule.score > 0 && rule.score <= 30) {
+                    // NEW: also emit soft:newprocess for soft distractions on first appearance
+                    console.log(`[ProcessScanner] >>> Emitting soft:flag (new) for ${rule.displayName} (${procName}, score: ${rule.score})`);
+                    this.emit('soft:flag', {
+                        processName: procName,
+                        displayName: rule.displayName,
+                        score: rule.score,
+                        category: rule.category,
+                    });
+                } else if (rule.score >= 70) {
+                    console.log(`[ProcessScanner] >>> Emitting instant:focus for ${rule.displayName} (${procName})`);
                     this.emit('instant:focus', {
                         processName: procName,
                         displayName: rule.displayName,
                         score: rule.score,
                     });
-                    console.log(`[processScanner] INSTANT focus: ${rule.displayName} (${procName})`);
                 }
             }
 
@@ -207,7 +318,7 @@ class ProcessScanner extends EventEmitter {
             // Update previous set for next diff
             this._previousProcesses = currentProcesses;
         } catch (err) {
-            console.error('[processScanner] _evaluate failed:', err.message);
+            console.error('[ProcessScanner] _evaluate failed:', err.message);
         }
     }
 }
